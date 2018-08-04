@@ -4,14 +4,11 @@ import org.junit.Assert;
 import org.junit.Test;
 
 import java.io.IOException;
-import java.util.HashSet;
+import java.util.Collection;
 import java.util.LinkedList;
 import java.util.Random;
 import java.util.Set;
-import java.util.concurrent.CopyOnWriteArraySet;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -27,6 +24,7 @@ public class DefensiveObjectsPoolTest {
     @Test
     public void testCanOpenAndClose() throws IOException {
         final ObjectsPool<Object> pool = new DefensiveObjectsPool<>();
+        assertFalse(pool.isOpen());
         pool.open();
         assertTrue(pool.isOpen());
         pool.close();
@@ -59,7 +57,7 @@ public class DefensiveObjectsPoolTest {
         final ObjectsPool<Object> pool = new DefensiveObjectsPool<>();
         pool.open();
 
-        executeInParallel(() -> {
+        executeInParallelAndWait(() -> {
             final Object resource = new Object();
             randomSleep();
             Assert.assertTrue(pool.add(resource));
@@ -67,14 +65,14 @@ public class DefensiveObjectsPoolTest {
 
         final Set<Object> uniqueObjects = new CopyOnWriteArraySet<>();
 
-        executeInParallel(() -> {
+        executeInParallelAndWait(() -> {
             randomSleep();
             final Object o = pool.acquire();
             assertTrue(uniqueObjects.add(o));
         }, 100);
 
         assertThat(uniqueObjects.size(), is(100));
-        run(() -> {
+        runInParallel(() -> {
             randomSleep();
             pool.release(uniqueObjects.iterator().next());
         });
@@ -86,7 +84,7 @@ public class DefensiveObjectsPoolTest {
         final ObjectsPool<Object> pool = new DefensiveObjectsPool<>();
         pool.open();
 
-        executeInParallel(() -> {
+        executeInParallelAndWait(() -> {
             final Object resource = new Object();
             randomSleep();
             Assert.assertTrue(pool.add(resource));
@@ -94,7 +92,7 @@ public class DefensiveObjectsPoolTest {
 
         final Set<Object> uniqueObjects = new CopyOnWriteArraySet<>();
 
-        executeInParallel(() -> {
+        executeInParallelAndWait(() -> {
             randomSleep();
             final Object o = pool.acquire(100, TimeUnit.MILLISECONDS);
             assertTrue(uniqueObjects.add(o));
@@ -109,10 +107,10 @@ public class DefensiveObjectsPoolTest {
         final ObjectsPool<Object> pool = new DefensiveObjectsPool<>();
         pool.open();
 
-        final HashSet<Object> addedObjects = new HashSet<>();
-        final HashSet<Object> acquiredObjects = new HashSet<>();
+        final Collection<Object> addedObjects = new LinkedBlockingQueue<>();
+        final Collection<Object> acquiredObjects = new LinkedBlockingQueue<>();
 
-        executeInParallel(() -> {
+        executeInParallelAndWait(() -> {
             randomSleep();
             final boolean b = new Random().nextBoolean();
             if (b) {
@@ -123,9 +121,8 @@ public class DefensiveObjectsPoolTest {
                 addedObjects.add(resource);
             } else {
                 final Object acquire = pool.acquire(100, TimeUnit.MILLISECONDS);
-                if (acquire != null) acquiredObjects.add(acquire);
-                if (acquiredObjects.size() > addedObjects.size()) {
-                    fail(acquiredObjects.size() + " " + addedObjects.size());
+                if (acquire != null) {
+                    acquiredObjects.add(acquire);
                 }
             }
 
@@ -140,7 +137,7 @@ public class DefensiveObjectsPoolTest {
         final ObjectsPool<Object> pool = new DefensiveObjectsPool<>();
         pool.open();
 
-        executeInParallel(() -> {
+        executeInParallelAndWait(() -> {
             try {
                 final Object resource = new Object();
                 randomSleep();
@@ -167,7 +164,7 @@ public class DefensiveObjectsPoolTest {
         pool.add(new Object());
         final Object acquired = pool.acquire();
 
-        final Thread closingPoolThread = run(() -> {
+        final Thread closingPoolThread = runInParallel(() -> {
             try {
                 pool.close();
             } catch (IOException e) {
@@ -179,8 +176,9 @@ public class DefensiveObjectsPoolTest {
         // Check for deadlock
         pool.close();
 
-        //Be sure that pool is is still not closed
-        assertTrue(closingPoolThread.isAlive() && !pool.isOpen());
+        //Be sure that pool is closed but the closing thread is alive because of the unreleased resource
+        assertTrue(closingPoolThread.isAlive());
+        assertFalse(pool.isOpen());
 
         pool.release(acquired);
 
@@ -194,11 +192,12 @@ public class DefensiveObjectsPoolTest {
         final ObjectsPool<Object> pool = new DefensiveObjectsPool<>();
         pool.open();
 
-        pool.add(pool);
+        pool.add(new Object());
 
         final LinkedList<Object> list = new LinkedList<>();
 
-        executeInParallel(() -> {
+        //Be sure that the resource cannot be acquired multiple times in parallel
+        executeInParallelAndWait(() -> {
             final Object acquire = pool.acquire(100, TimeUnit.MILLISECONDS);
             if(nonNull(acquire)) {
                 list.push(acquire);
@@ -208,7 +207,7 @@ public class DefensiveObjectsPoolTest {
         assertThat(list.size(), is(1));
     }
 
-    private Thread run(Runnable task) {
+    private Thread runInParallel(Runnable task) {
         final Thread closingPoolThread = new Thread(task);
         closingPoolThread.start();
         return closingPoolThread;
@@ -222,16 +221,16 @@ public class DefensiveObjectsPoolTest {
         }
     }
 
-    private void executeInParallel(Runnable task, int runsCount) {
+    private void executeInParallelAndWait(Runnable task, int runsCount) {
         final ExecutorService service = newFixedThreadPool(runsCount);
-        Stream.iterate(0, (c) -> c++)
+        Stream.iterate(0, (i) -> i++)
                 .limit(runsCount)
                 .map((c) -> service.submit(task)).collect(Collectors.toList())
                 .forEach(f -> {
                     try {
                         f.get();
                     } catch (InterruptedException | ExecutionException e) {
-                        e.printStackTrace();
+                        throw new RuntimeException(e);
                     }
                 });
 

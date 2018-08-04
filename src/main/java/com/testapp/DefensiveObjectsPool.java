@@ -39,7 +39,7 @@ public class DefensiveObjectsPool<R> implements ObjectsPool<R> {
     }
 
     public R acquire() {
-        if (!validate()) {
+        if (!isOpen()) {
             return null;
         }
         return pollFromPool(null, null);
@@ -71,7 +71,13 @@ public class DefensiveObjectsPool<R> implements ObjectsPool<R> {
     }
 
     public R acquire(long timeout, TimeUnit timeUnit) {
-        if (!validate()) {
+        if(timeout <= 0) {
+            throw new IllegalArgumentException("Timeout should be greater than 0");
+        }
+        if(isNull(timeUnit)){
+            throw new IllegalArgumentException("timeUnit cannot be null");
+        }
+        if (!isOpen()) {
             return null;
         }
         return pollFromPool(timeUnit, timeout);
@@ -81,21 +87,22 @@ public class DefensiveObjectsPool<R> implements ObjectsPool<R> {
         if (shutdown || !open) {
             return;
         }
+        if(isNull(resource)) {
+            throw new IllegalArgumentException("resource cannot be null");
+        }
         if (acquired.contains(resource)) {
             queue.add(resource);
         }
         acquired.remove(resource);
     }
 
-    private boolean validate() {
-        return !shutdown && open && !closingLock.isLocked();
-    }
-
     public boolean add(R resource) {
-        if (!validate()) {
+        if (!isOpen()) {
             return false;
         }
-
+        if(isNull(resource)) {
+            throw new IllegalArgumentException("resource cannot be null");
+        }
         if (!queue.contains(resource)) {
             return queue.offer(resource);
         }
@@ -110,18 +117,21 @@ public class DefensiveObjectsPool<R> implements ObjectsPool<R> {
     // Our resources are thread safe, so another thread cannot get the resource
     // and the description doesn't have any sense, as well as "removeNow" method
     public boolean remove(R resource) {
-        if (!validate()) {
+        if (!isOpen()) {
             return false;
+        }
+        if(isNull(resource)) {
+            throw new IllegalArgumentException("resource cannot be null");
         }
         return queue.remove(resource);
 
     }
 
     public void close() {
-        if (!validate()) {
+        if (!isOpen()) {
             return;
         }
-        // extra releasingLock helps us to avoid possible deadlocks when two threads trying to close simultaneously
+        // extra closingLock helps us to avoid possible extra blocking when two threads trying to close simultaneously
         if (closingLock.tryLock()) {
             try {
                 while (!acquired.isEmpty()) {
@@ -148,7 +158,7 @@ public class DefensiveObjectsPool<R> implements ObjectsPool<R> {
     }
 
     public void closeImmediately() {
-        if (!validate()) {
+        if (!isOpen()) {
             return;
         }
         cleanup();
